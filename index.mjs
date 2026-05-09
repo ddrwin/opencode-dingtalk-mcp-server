@@ -338,17 +338,18 @@ async function handleDingTalkMessage(res) {
       if (!fs.existsSync(pendingDir)) {
         fs.mkdirSync(pendingDir, { recursive: true });
       }
+      const pendingContent = JSON.stringify({
+        conversationId: finalConversationId,
+        content,
+        senderStaffId,
+        sessionWebhook,
+        sessionWebhookExpiredTime,
+        receivedAt: new Date().toISOString(),
+      }, null, 2);
+      // 强制以 UTF-8 编码写入，避免 Windows 中文系统下编码错误
       fs.writeFileSync(
         join(pendingDir, `${Date.now()}.json`),
-        JSON.stringify({
-          conversationId: finalConversationId,
-          content,
-          senderStaffId,
-          sessionWebhook,
-          sessionWebhookExpiredTime,
-          receivedAt: new Date().toISOString(),
-        }, null, 2),
-        'utf-8'
+        Buffer.from(pendingContent, 'utf-8')
       );
       console.error(`💾 待处理消息已保存: ${finalConversationId}`);
     } catch (saveErr) {
