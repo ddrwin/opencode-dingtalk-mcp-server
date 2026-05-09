@@ -50,6 +50,51 @@ const CONFIG = {
   }
 };
 
+// ============ 文档加载与记忆系统 ============
+const DOCUMENTS_PATH = process.env.DOCUMENTS_PATH;
+const SESSIONS_PATH = process.env.SESSIONS_PATH || join(__dirname, 'sessions');
+
+// 核心身份文档（按优先级排序），与 Claude Code / OpenCode 共享同一套
+const DOCUMENTS_CORE = (process.env.DOCUMENTS_CORE ||
+  'IDENTITY V0.2.md,工程哲学 V3.3.md,纪律手册 V3.3.md,AGENTS V3.3.md,VISION.md'
+).split(',').map(s => s.trim());
+
+function loadIdentityDocuments() {
+  if (!DOCUMENTS_PATH) {
+    console.error('⚠️  未配置 DOCUMENTS_PATH，使用基础身份提示');
+    return `你是 Sisyphus，一个通过钉钉与用户通信的 AI 助手。请用中文回复，保持回复简洁、有条理。`;
+  }
+
+  console.error(`📚 加载身份文档: ${DOCUMENTS_PATH}`);
+  const loaded = [];
+  const failed = [];
+  let systemPrompt = '';
+
+  for (const docName of DOCUMENTS_CORE) {
+    const docPath = join(DOCUMENTS_PATH, docName);
+    try {
+      if (fs.existsSync(docPath)) {
+        const content = fs.readFileSync(docPath, 'utf-8');
+        systemPrompt += `===== ${docName.replace('.md', '')} =====\n${content}\n\n`;
+        loaded.push(docName);
+      } else {
+        failed.push(docName);
+      }
+    } catch (err) {
+      console.error(`❌ 读取文档失败 ${docName}: ${err.message}`);
+      failed.push(docName);
+    }
+  }
+
+  console.error(`📄 已加载 ${loaded.length}/${DOCUMENTS_CORE.length} 个文档`);
+  if (failed.length > 0) {
+    console.error(`⚠️  未找到: ${failed.join(', ')}`);
+  }
+  console.error(`📏 系统提示长度: ${Buffer.byteLength(systemPrompt, 'utf-8')} bytes`);
+
+  return systemPrompt;
+}
+
 // ============ 性能监控 ============
 class PerformanceMetrics {
   constructor() {
@@ -131,8 +176,8 @@ const dingtalkClient = new DWClient({
 // ============ DeepSeek AI 配置 ============
 const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
 const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
-const AI_SYSTEM_PROMPT = `你是 Sisyphus，一个通过钉钉与用户通信的 AI 助手。
-请用中文回复，保持回复简洁、有条理。`;
+const AI_SYSTEM_PROMPT = loadIdentityDocuments();
+console.error(`🤖 AI 身份就绪 (${AI_SYSTEM_PROMPT.length} chars)`);
 
 if (!DEEPSEEK_API_KEY) {
   console.error("⚠️  未配置 DEEPSEEK_API_KEY，自动回复功能不可用");
@@ -298,20 +343,79 @@ class MessageQueueManager {
   }
 }
 
+// ============ 会话记忆持久化 ============
+class SessionMemory {
+  constructor(sessionsPath) {
+    this.sessionsPath = sessionsPath;
+    // 不设上限，所有对话永久保留（用户语料素材）
+
+    if (!fs.existsSync(sessionsPath)) {
+      fs.mkdirSync(sessionsPath, { recursive: true });
+      console.error(`📁 创建会话目录: ${sessionsPath}`);
+    }
+  }
+
+  getHistory(conversationId) {
+    const filePath = this.getFilePath(conversationId);
+    try {
+      if (fs.existsSync(filePath)) {
+        return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      }
+    } catch (err) {
+      console.error(`⚠️  读取会话历史失败: ${err.message}`);
+    }
+    return [];
+  }
+
+  appendExchange(conversationId, userMsg, aiReply) {
+    const history = this.getHistory(conversationId);
+    history.push(
+      { role: "user", content: userMsg },
+      { role: "assistant", content: aiReply }
+    );
+    this.writeHistory(conversationId, history);
+  }
+
+  getFilePath(conversationId) {
+    const safeName = conversationId.replace(/[<>:"/\\|?*]/g, '_');
+    return join(this.sessionsPath, `${safeName}.json`);
+  }
+
+  writeHistory(conversationId, history) {
+    try {
+      fs.writeFileSync(this.getFilePath(conversationId), JSON.stringify(history, null, 2), 'utf-8');
+    } catch (err) {
+      console.error(`⚠️  保存会话历史失败: ${err.message}`);
+    }
+  }
+
+  getStats() {
+    try {
+      const files = fs.readdirSync(this.sessionsPath);
+      return { totalSessions: files.filter(f => f.endsWith('.json')).length };
+    } catch {
+      return { totalSessions: 0 };
+    }
+  }
+}
+
 // ============ DeepSeek AI 调用 ============
 
-async function callDeepSeekAI(content) {
+async function callDeepSeekAI(content, history = []) {
   if (!DEEPSEEK_API_KEY) {
     throw new Error("未配置 DEEPSEEK_API_KEY");
   }
 
+  const messages = [
+    { role: "system", content: AI_SYSTEM_PROMPT },
+    ...history,
+    { role: "user", content },
+  ];
+
   const response = await got.post('https://api.deepseek.com/v1/chat/completions', {
     json: {
       model: DEEPSEEK_MODEL,
-      messages: [
-        { role: "system", content: AI_SYSTEM_PROMPT },
-        { role: "user", content },
-      ],
+      messages,
       max_tokens: 2000,
     },
     headers: {
@@ -333,6 +437,7 @@ async function callDeepSeekAI(content) {
 // ============ 全局状态 ============
 const webhookManager = new SessionWebhookManager();
 const messageQueueManager = new MessageQueueManager();
+const sessionMemory = new SessionMemory(SESSIONS_PATH);
 
 // ============ 消息处理函数 ============
 
@@ -403,12 +508,14 @@ async function handleDingTalkMessage(res) {
       return;
     }
 
-    // 调用 DeepSeek AI 自动回复
+    // 调用 DeepSeek AI 自动回复（带会话记忆）
     console.error("🤖 调用 DeepSeek AI 处理...");
     const aiStartTime = Date.now();
     let reply;
     try {
-      reply = await callDeepSeekAI(content);
+      const history = sessionMemory.getHistory(finalConversationId);
+      console.error(`💭 会话历史: ${history.length} 条消息`);
+      reply = await callDeepSeekAI(content, history);
       const aiDuration = Date.now() - aiStartTime;
       console.error(`💬 AI 回复 (${aiDuration}ms): ${reply.substring(0, 100)}${reply.length > 100 ? '...' : ''}`);
     } catch (error) {
@@ -439,6 +546,9 @@ async function handleDingTalkMessage(res) {
     } catch (syncErr) {
       console.error("⚠️  OpenCode 同步失败（不影响自动回复）:", syncErr.message);
     }
+
+    // 保存会话记忆
+    sessionMemory.appendExchange(finalConversationId, content, reply);
 
     // 发送回复到钉钉
     const webhook = webhookManager.getWebhook(finalConversationId);
@@ -565,6 +675,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
             queue: messageQueueManager.getStats(),
           },
           webhooks: webhookManager.getStats(),
+          history: sessionMemory.getStats(),
           performance: metrics.getStats(),
         };
         return {

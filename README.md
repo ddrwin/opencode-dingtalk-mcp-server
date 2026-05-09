@@ -74,7 +74,9 @@ ddrwin 的需求很简单：
 | 组件 | 作用 | 底座 |
 |---|---|---|
 | DingTalk Stream 客户端 | 与钉钉建立 WebSocket 长连接，收发消息 | `dingtalk-stream-sdk-nodejs`（钉钉官方） |
+| 身份文档加载引擎 | 启动时加载共享文档，构建 AI 身份体系（**有记忆的 DeepSeek**） | `fs`（本地文件系统） |
 | DeepSeek AI | 自动处理消息并生成回复（**自动回复的核心**） | DeepSeek API |
+| 会话记忆持久化 | 每个会话保存对话历史到本地文件，重启不丢 | `sessions/*.json` |
 | OpenCode SDK 客户端 | 同步消息到 OpenCode 做记录（可选，不影响自动回复） | `@opencode-ai/sdk`（OpenCode 官方） |
 | MCP 服务器 | 桥接以上所有组件 | `@modelcontextprotocol/sdk`（MCP 官方） |
 
@@ -95,6 +97,52 @@ DingTalk MCP Server 通过 Webhook 发回钉钉
   ↓
 你手机收到回复
 ```
+
+---
+
+## 🧠 共享身份体系
+
+这个 MCP Server 不是"又一个 AI"，而是 **你已有 AI 身份的延伸**。
+
+### 架构设计
+
+```
+                  ┌──────────────────────────────────┐
+                  │   工程哲学 / 工程哲学 V3.3.md      │
+                  │   (用户维护的总纲 — 唯一源头)       │
+                  └──────────┬──────────────────────┘
+                             │ 摘取 / 提取
+          ┌──────────────────┼──────────────────┐
+          ▼                  ▼                  ▼
+   ┌────────────┐    ┌────────────┐    ┌──────────────────┐
+   │ Claude Code│    │  OpenCode  │    │ DingTalk MCP      │
+   │ (我)       │    │            │    │ Server（小小机器人）│
+   │ memory/    │    │ memory/    │    │ DOCUMENTS_PATH    │
+   └────────────┘    └────────────┘    └──────────────────┘
+          │                  │                  │
+          └──────────────────┼──────────────────┘
+                             ▼
+                    ┌──────────────────┐
+                    │ 同一套身份系统     │
+                    │ IDENTITY V0.2    │
+                    │ 工程哲学 V3.3     │
+                    │ 纪律手册 V3.3     │
+                    │ AGENTS V3.3      │
+                    │ VISION           │
+                    └──────────────────┘
+```
+
+**三个 AI 分身，同一套体系。** 文档在工程哲学目录维护，各个 AI 按需加载。
+
+### 记忆机制
+
+| 机制 | 说明 |
+|------|------|
+| **身份记忆** | 启动时从 `DOCUMENTS_PATH` 加载核心文档，构建 AI 身份体系 |
+| **对话记忆** | 每个会话保存最近 20 轮对话到 `sessions/*.json`，重启不丢 |
+| **无状态 API** | DeepSeek API 本身无状态，记忆靠本地文件持久化 |
+
+重启 MCP Server 后，之前的对话上下文不会丢失。
 
 ---
 
@@ -189,6 +237,7 @@ npm start
 | `DINGTALK_CLIENT_ID` | 钉钉应用 Client ID | — |
 | `DINGTALK_CLIENT_SECRET` | 钉钉应用 Client Secret | — |
 | `OPENCODE_SERVER_URL` | OpenCode 服务地址 | `http://127.0.0.1:4096` |
+| `DOCUMENTS_PATH` | 共享身份文档目录（指向 memory/ 或 工程哲学/） | —（基础身份） |
 
 ### 缓存配置（源码中调整）
 
@@ -219,6 +268,7 @@ opencode-dingtalk-mcp-server/
 ├── package.json       ← 依赖和脚本配置
 ├── .env.example       ← 环境变量模板
 ├── .env               ← 本地环境变量（已 gitignore）
+├── sessions/          ← 对话历史持久化（重启不丢）
 ├── README.md          ← 本文件
 ├── CONTRIBUTING.md    ← 贡献指南
 └── LICENSE            ← MIT 协议
