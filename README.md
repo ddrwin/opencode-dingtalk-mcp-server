@@ -1,6 +1,6 @@
 # DingTalk MCP Server
 
-让 OpenCode（Sisyphus）与钉钉双向实时通信 —— 你在外头钉钉发消息，家里的 AI 收到并干活，结果回你手机。
+让钉钉 AI 助手自动回复你的消息 —— 你在外头发钉钉，家里的 AI 收到并处理，结果回你手机。
 
 ---
 
@@ -61,12 +61,12 @@ ddrwin 的需求很简单：
                                      │  index.mjs          │
                                      └─────────┬──────────┘
                                                │
-                                      MCP Stdio │ Protocol
-                                               │
-                                     ┌─────────▼──────────┐
-                                     │  OpenCode           │
-                                     │  (Sisyphus AI)      │
-                                     └────────────────────┘
+                                    ┌──────────┴──────────┐
+                                    ▼                     ▼
+                            ┌──────────────┐   ┌──────────────────┐
+                            │  DeepSeek AI │   │  OpenCode (记录)  │
+                            │  (自动回复)   │   │  (可选同步)       │
+                            └──────────────┘   └──────────────────┘
 ```
 
 ### 核心组件
@@ -74,8 +74,9 @@ ddrwin 的需求很简单：
 | 组件 | 作用 | 底座 |
 |---|---|---|
 | DingTalk Stream 客户端 | 与钉钉建立 WebSocket 长连接，收发消息 | `dingtalk-stream-sdk-nodejs`（钉钉官方） |
-| MCP 服务器 | 暴露工具接口给 OpenCode 调用 | `@modelcontextprotocol/sdk`（MCP 官方） |
-| OpenCode SDK 客户端 | 与 OpenCode 通信，路由消息到会话 | `@opencode-ai/sdk`（OpenCode 官方） |
+| DeepSeek AI | 自动处理消息并生成回复（**自动回复的核心**） | DeepSeek API |
+| OpenCode SDK 客户端 | 同步消息到 OpenCode 做记录（可选，不影响自动回复） | `@opencode-ai/sdk`（OpenCode 官方） |
+| MCP 服务器 | 桥接以上所有组件 | `@modelcontextprotocol/sdk`（MCP 官方） |
 
 ### 消息流程
 
@@ -87,11 +88,8 @@ ddrwin 的需求很简单：
 DingTalk MCP Server
   ├─ 消息解析 + 去重检查
   ├─ 保存会话 Webhook（用于回复）
-  ├─ 转发给 OpenCode
-  ↓
-Sisyphus AI 处理你的消息
-  ↓
-AI 产出回复
+  ├─ ★ 调用 DeepSeek AI 自动生成回复
+  ├─ （可选）同步到 OpenCode 做记录
   ↓
 DingTalk MCP Server 通过 Webhook 发回钉钉
   ↓

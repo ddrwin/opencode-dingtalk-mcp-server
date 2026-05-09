@@ -128,6 +128,16 @@ const dingtalkClient = new DWClient({
   clientSecret: process.env.DINGTALK_CLIENT_SECRET,
 });
 
+// ============ DeepSeek AI 配置 ============
+const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
+const DEEPSEEK_MODEL = process.env.DEEPSEEK_MODEL || "deepseek-chat";
+const AI_SYSTEM_PROMPT = `你是 Sisyphus，一个通过钉钉与用户通信的 AI 助手。
+请用中文回复，保持回复简洁、有条理。`;
+
+if (!DEEPSEEK_API_KEY) {
+  console.error("⚠️  未配置 DEEPSEEK_API_KEY，自动回复功能不可用");
+}
+
 // ============ HTTP 连接池 ============
 const httpAgent = new https.Agent({
   keepAlive: CONFIG.HTTP.KEEP_ALIVE,
@@ -288,6 +298,38 @@ class MessageQueueManager {
   }
 }
 
+// ============ DeepSeek AI 调用 ============
+
+async function callDeepSeekAI(content) {
+  if (!DEEPSEEK_API_KEY) {
+    throw new Error("未配置 DEEPSEEK_API_KEY");
+  }
+
+  const response = await got.post('https://api.deepseek.com/v1/chat/completions', {
+    json: {
+      model: DEEPSEEK_MODEL,
+      messages: [
+        { role: "system", content: AI_SYSTEM_PROMPT },
+        { role: "user", content },
+      ],
+      max_tokens: 2000,
+    },
+    headers: {
+      'Authorization': `Bearer ${DEEPSEEK_API_KEY}`,
+      'Content-Type': 'application/json',
+    },
+    timeout: { request: 30000 },
+    retry: { limit: 1 },
+  });
+
+  const data = JSON.parse(response.body);
+  const reply = data.choices?.[0]?.message?.content;
+  if (!reply) {
+    throw new Error("AI 返回为空");
+  }
+  return reply;
+}
+
 // ============ 全局状态 ============
 const webhookManager = new SessionWebhookManager();
 const messageQueueManager = new MessageQueueManager();
@@ -361,36 +403,42 @@ async function handleDingTalkMessage(res) {
       return;
     }
 
-    // 发送到 OpenCode 处理
-    let sessionId = sessions.get(finalConversationId);
-    if (!sessionId) {
-      console.error("🆕 创建新会话...");
-      const session = await opencodeClient.session.create({
-        body: { title: `钉钉会话-${finalConversationId}` },
-      });
-      sessionId = session.data?.id;
-      if (sessionId) {
-        sessions.set(finalConversationId, sessionId);
-        console.error(`✅ 会话创建成功: ${sessionId}`);
-      }
-    } else {
-      console.error(`🔄 使用现有会话: ${sessionId}`);
+    // 调用 DeepSeek AI 自动回复
+    console.error("🤖 调用 DeepSeek AI 处理...");
+    const aiStartTime = Date.now();
+    let reply;
+    try {
+      reply = await callDeepSeekAI(content);
+      const aiDuration = Date.now() - aiStartTime;
+      console.error(`💬 AI 回复 (${aiDuration}ms): ${reply.substring(0, 100)}${reply.length > 100 ? '...' : ''}`);
+    } catch (error) {
+      console.error(`❌ AI 处理失败: ${error.message}`);
+      reply = `[自动回复暂不可用: ${error.message}]`;
     }
 
-    console.error("📤 发送消息到 OpenCode...");
-    const aiStartTime = Date.now();
-    const result = await opencodeClient.session.prompt({
-      path: { id: sessionId },
-      body: { parts: [{ type: "text", text: content }] },
-    });
-    const aiDuration = Date.now() - aiStartTime;
-
-    const reply = result.data?.parts
-      ?.filter(p => p.type === "text")
-      ?.map(p => p.text)
-      ?.join("\n") || "没有收到回复";
-
-    console.error(`💬 回复内容 (${aiDuration}ms): ${reply.substring(0, 100)}${reply.length > 100 ? '...' : ''}`);
+    // 非阻塞同步到 OpenCode（仅记录，不依赖回复）
+    try {
+      let sessionId = sessions.get(finalConversationId);
+      if (!sessionId) {
+        const session = await opencodeClient.session.create({
+          body: { title: `钉钉会话-${finalConversationId}` },
+        });
+        sessionId = session.data?.id;
+        if (sessionId) {
+          sessions.set(finalConversationId, sessionId);
+        }
+      }
+      if (sessionId) {
+        opencodeClient.session.prompt({
+          path: { id: sessionId },
+          body: { parts: [{ type: "text", text: `[来自钉钉] ${content}\n\n---\n\n[自动回复] ${reply}` }] },
+        }).catch(err => {
+          console.error("⚠️  OpenCode 同步失败（不影响自动回复）:", err.message);
+        });
+      }
+    } catch (syncErr) {
+      console.error("⚠️  OpenCode 同步失败（不影响自动回复）:", syncErr.message);
+    }
 
     // 发送回复到钉钉
     const webhook = webhookManager.getWebhook(finalConversationId);
