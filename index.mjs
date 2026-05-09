@@ -9,6 +9,7 @@ import { DWClient } from "dingtalk-stream-sdk-nodejs";
 import dotenv from "dotenv";
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
+import fs from 'fs';
 import { LRUCache } from 'lru-cache';
 import PQueue from 'p-queue';
 import got from 'got';
@@ -329,6 +330,29 @@ async function handleDingTalkMessage(res) {
 
     if (sessionWebhook && sessionWebhookExpiredTime) {
       webhookManager.setWebhook(finalConversationId, sessionWebhook, sessionWebhookExpiredTime);
+    }
+
+    // 保存待处理消息到文件（作为 OpenCode API 不可用时的后备）
+    try {
+      const pendingDir = join(__dirname, 'pending');
+      if (!fs.existsSync(pendingDir)) {
+        fs.mkdirSync(pendingDir, { recursive: true });
+      }
+      fs.writeFileSync(
+        join(pendingDir, `${Date.now()}.json`),
+        JSON.stringify({
+          conversationId: finalConversationId,
+          content,
+          senderStaffId,
+          sessionWebhook,
+          sessionWebhookExpiredTime,
+          receivedAt: new Date().toISOString(),
+        }, null, 2),
+        'utf-8'
+      );
+      console.error(`💾 待处理消息已保存: ${finalConversationId}`);
+    } catch (saveErr) {
+      console.error("⚠️  保存待处理消息失败:", saveErr.message);
     }
 
     if (!content) {

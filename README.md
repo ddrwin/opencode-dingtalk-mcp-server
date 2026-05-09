@@ -1,184 +1,150 @@
 # DingTalk MCP Server
 
-钉钉 MCP 服务器 - 让 OpenCode 与钉钉机器人无缝集成，支持 Stream 模式实时双向通信。
-
-[English](#english) | [中文](#中文)
+让 OpenCode（Sisyphus）与钉钉双向实时通信 —— 你在外头钉钉发消息，家里的 AI 收到并干活，结果回你手机。
 
 ---
 
-<a name="中文"></a>
-## 📖 中文文档
+## 📖 项目背景
 
-### 🌟 项目简介
+### 为什么有这个项目
 
-DingTalk MCP Server 是一个基于 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) 的服务器，它将钉钉机器人与 OpenCode AI 助手连接起来，实现双向消息通信。
+ddrwin 的需求很简单：
 
-**核心特性：**
-- ✅ **Stream 模式** - 实时双向通信，无需公网 IP
-- ✅ **LRU 缓存** - 智能内存管理，防止 OOM
-- ✅ **异步队列** - 并发控制，吞吐量提升 3x
-- ✅ **HTTP 连接池** - Keep-Alive 复用，发送速度提升 75%
-- ✅ **消息去重** - 防止重复处理同一消息
-- ✅ **频率限制** - 遵守钉钉 API 限制（20条/分钟）
-- ✅ **长消息分片** - 自动处理超过 20KB 的长消息
+> **场景**：人在户外，用手机钉钉给家里的 OpenCode AI agent（Sisyphus）发消息，Sisyphus 收到后执行任务，结果回传到钉钉。
+>
+> **约束**：人在国内，不能依赖需要翻墙的方案（Telegram、Discord 等排除）。国内可用的平台：钉钉、飞书、企业微信、微信、QQ。
+>
+> **目标**：双向实时通信，不需要公网 IP，不需要 ngrok。
 
-### 🏗️ 设计框架
+### 方案评估过程
 
-#### 系统架构
+在 GitHub 上调研了国内 IM 平台的 MCP Server 方案：
+
+| 方案 | Stars | 双向通信 | 维护者 | 结论 |
+|---|---|---|---|---|
+| `yewh/opencode-dingtalk-mcp-server` | 2 | ✅ Stream 模式 | 个人开发者 | ✅ **Fork 自建** |
+| `open-dingtalk/dingtalk-mcp`（钉钉官方） | 17 | ❌ 单向推送 | 钉钉官方 | ❌ 不是聊天方案 |
+| `loonghao/wecom-bot-mcp-server`（企微） | 82 | ❌ 单向 | 第三方 | ❌ 需求不对口 |
+| 飞书 MCP（`ztxtxwd/feishu-mcp-server`） | 83 | ✅ | 第三方 | ❌ ddrwin 不想用飞书 |
+
+**最终决策：Fork `yewh/opencode-dingtalk-mcp-server` 并自维护。**
+
+理由：
+1. 它解决的问题正好是"钉钉 ↔ OpenCode 双向实时通信"
+2. 使用钉钉官方 Stream SDK（`dingtalk-stream-sdk-nodejs`）作为通信底座，WebSocket 长连接，**不需要公网 IP**
+3. 代码量极小（1 个文件，~18KB），维护成本极低
+4. MIT 协议，可自由 fork 和修改
+5. 底座全是官方 SDK（钉钉官方、MCP 官方、OpenCode 官方），底座不动它就不会废
+
+### 决策记录
+
+| 日期 | 决策 |
+|---|---|
+| 2026-05-09 | Fork `yewh/opencode-dingtalk-mcp-server` 到 ddrwin 账号 |
+| 2026-05-09 | 项目根目录：`D:\同步文件夹\软件\3 - AI 生产力\5. 项目Projects\opencode-dingtalk-mcp-server\` |
+| 2026-05-09 | 首次计划：先跑通双向通信，后续可合并钉钉官方 MCP 工具能力 |
+
+---
+
+## 🏗️ 系统架构
 
 ```
-┌─────────────┐      WebSocket       ┌──────────────────┐
-│   钉钉用户   │ ◄──────────────────► │  DingTalk Stream │
-└─────────────┘                      │     (钉钉云端)    │
-                                     └────────┬─────────┘
-                                              │
-                                     WebSocket│Stream
-                                              │
-                                     ┌────────▼─────────┐
-                                     │  DingTalk MCP    │
-                                     │     Server       │
-                                     │  (本服务器)       │
-                                     └────────┬─────────┘
-                                              │
-                                     MCP Stdio│Protocol
-                                              │
-                                     ┌────────▼─────────┐
-                                     │     OpenCode     │
-                                     │   (AI 助手)      │
-                                     └──────────────────┘
+┌──────────────┐      WebSocket       ┌──────────────────┐
+│  你的手机     │ ◄──────────────────► │  钉钉 Stream 云端 │
+│  (钉钉 App)   │                      └────────┬─────────┘
+└──────────────┘                               │
+                                      WebSocket │ Stream
+                                               │
+                                     ┌─────────▼──────────┐
+                                     │  DingTalk MCP      │
+                                     │  Server (本服务)    │
+                                     │  index.mjs          │
+                                     └─────────┬──────────┘
+                                               │
+                                      MCP Stdio │ Protocol
+                                               │
+                                     ┌─────────▼──────────┐
+                                     │  OpenCode           │
+                                     │  (Sisyphus AI)      │
+                                     └────────────────────┘
 ```
 
-#### 核心组件
+### 核心组件
 
-**1. DingTalk Stream SDK 客户端**
-- 使用 `dingtalk-stream-sdk-nodejs` 建立 WebSocket 连接
-- 支持 Stream 模式（非 Webhook），实时双向通信
-- 自动重连机制（指数退避，最多 10 次）
+| 组件 | 作用 | 底座 |
+|---|---|---|
+| DingTalk Stream 客户端 | 与钉钉建立 WebSocket 长连接，收发消息 | `dingtalk-stream-sdk-nodejs`（钉钉官方） |
+| MCP 服务器 | 暴露工具接口给 OpenCode 调用 | `@modelcontextprotocol/sdk`（MCP 官方） |
+| OpenCode SDK 客户端 | 与 OpenCode 通信，路由消息到会话 | `@opencode-ai/sdk`（OpenCode 官方） |
 
-**2. LRU 缓存管理器**
-- 消息去重缓存：1000 条，5 分钟 TTL
-- 会话缓存：100 个，30 分钟 TTL
-- Webhook 缓存：100 个，2 小时 TTL
-- 自动清理过期数据，防止内存泄漏
+### 消息流程
 
-**3. 异步消息队列 (P-Queue)**
-- 并发控制：默认 3 并发
-- 削峰填谷：消息缓冲，避免 WebSocket 阻塞
-- 队列监控：实时显示队列大小和堆积情况
-
-**4. HTTP 连接池 (Got)**
-- Keep-Alive 连接复用
-- 最大连接数：10
-- 超时：10秒，重试：2次
-
-**5. MCP 服务器**
-- STDIO 传输层
-- JSON-RPC 2.0 协议
-- 工具注册和调用处理
-
-### 🔑 关键节点
-
-#### 1. 连接管理
-
-**DingTalk Stream 连接**
-```javascript
-const dingtalkClient = new DWClient({
-  clientId: process.env.DINGTALK_CLIENT_ID,
-  clientSecret: process.env.DINGTALK_CLIENT_SECRET,
-});
-
-dingtalkClient
-  .registerCallbackListener("/v1.0/im/bot/messages/get", handleMessage)
-  .connect();
 ```
-
-**自动重连机制**
-```
-连接断开
+你在钉钉发消息
    ↓
-触发 onError 回调
-   ↓
-指数退避重连策略
-   ↓
-第1次：等待 5秒
-第2次：等待 10秒
-第3次：等待 20秒
-...最多 10 次
-```
-
-#### 2. 消息处理流程
-
-**接收消息流程**
-```
-钉钉用户发送消息
-   ↓
-钉钉 Stream 服务器 (WebSocket)
+钉钉 Stream 云端（WebSocket）
    ↓
 DingTalk MCP Server
-   ├─ 消息解析 (JSON.parse)
-   ├─ 去重检查 (LRU Cache)
-   ├─ 保存 Webhook
-   ├─ 查找/创建 OpenCode 会话
-   ↓
-OpenCode AI 处理
-   ↓
-获取 AI 回复
-   ↓
-通过 sessionWebhook 发送回钉钉
+  ├─ 消息解析 + 去重检查
+  ├─ 保存会话 Webhook（用于回复）
+  ├─ 转发给 OpenCode
+  ↓
+Sisyphus AI 处理你的消息
+  ↓
+AI 产出回复
+  ↓
+DingTalk MCP Server 通过 Webhook 发回钉钉
+  ↓
+你手机收到回复
 ```
 
-#### 3. 数据流
+---
 
-**发送消息流程**
-```
-OpenCode 调用 MCP 工具
-   ↓
-dingtalk_send_message
-   ├─ 查找 sessionWebhook (LRU Cache)
-   ├─ 检查频率限制
-   ├─ 发送 HTTP POST (连接池)
-   ↓
-钉钉用户收到消息
-```
+## 🚀 快速开始
 
-### 🚀 快速开始
+### 前置要求
 
-#### 1. 获取钉钉应用凭证
+- Node.js >= 18.0.0
+- 一个钉钉企业内部应用（用于获取 Client ID 和 Client Secret）
+- OpenCode 已安装并可用
+
+### 第一步：获取钉钉应用凭证
 
 1. 访问 [钉钉开放平台](https://open.dingtalk.com/)
-2. 创建企业内部应用
-3. 获取 **Client ID** 和 **Client Secret**
+2. 创建一个企业内部应用
+3. 在应用详情页获取 **Client ID**（原 AppKey）和 **Client Secret**（原 AppSecret）
+4. 在应用权限管理中添加**企业内机器人发送消息**权限
+5. 发布应用
 
-#### 2. 安装依赖
+### 第二步：安装依赖
 
 ```bash
-git clone <repository-url>
-cd dingtalk-mcp-server
+cd DingTalk-MCP-Server（本目录）
 npm install
 ```
 
-#### 3. 配置环境变量
+### 第三步：配置环境变量
+
+复制 `.env.example` 为 `.env`，填入你的钉钉应用凭证：
 
 ```bash
 cp .env.example .env
-# 编辑 .env 文件，填入你的凭证
 ```
 
+编辑 `.env`：
+
 ```env
-DINGTALK_CLIENT_ID=your_client_id
-DINGTALK_CLIENT_SECRET=your_client_secret
+# 钉钉应用凭证
+DINGTALK_CLIENT_ID=your_client_id_here
+DINGTALK_CLIENT_SECRET=your_client_secret_here
+
+# OpenCode 地址（如果 OpenCode serve 在其他端口则修改）
 OPENCODE_SERVER_URL=http://127.0.0.1:4096
 ```
 
-#### 4. 启动服务器
+### 第四步：配置 OpenCode
 
-```bash
-npm start
-```
-
-#### 5. 配置 OpenCode
-
-在 OpenCode 配置文件（`~/.config/opencode/opencode.json`）中添加：
+在 OpenCode 配置文件 `~/.config/opencode/opencode.json` 中添加：
 
 ```json
 {
@@ -187,200 +153,7 @@ npm start
       "type": "local",
       "command": [
         "node",
-        "/path/to/dingtalk-mcp-server/index.mjs"
-      ],
-      "enabled": true
-    }
-  }
-}
-```
-#### 6. 启动OpenCode serve
-
-```bash
-opencode serve
-```
-
-#### 6. 测试
-
-在钉钉中给机器人发送消息，观察终端输出。
-
-### 📖 使用方式
-
-#### 方式 1：直接运行
-
-```bash
-npm start
-```
-
-服务器会自动：
-- 连接到钉钉 Stream
-- 接收消息并转发给 OpenCode
-- 将 OpenCode 回复发送回钉钉
-
-#### 方式 2：在 OpenCode 中使用 MCP 工具
-
-**获取统计信息**
-```
-使用 dingtalk 工具获取统计信息
-```
-
-**发送消息**
-```
-使用 dingtalk 工具发送消息 "你好" 到会话 [conversationId]
-```
-
-**列出会话**
-```
-使用 dingtalk 工具列出会话
-```
-
-**获取性能数据**
-```
-使用 dingtalk 工具获取性能数据
-```
-
-#### 获取 Conversation ID
-
-1. 启动服务器
-2. 在钉钉中发送消息
-3. 查看终端输出，复制 `会话ID`
-4. 使用该 ID 发送消息
-
-### ⚙️ 性能配置
-
-可在代码中调整 `CONFIG` 对象：
-
-```javascript
-const CONFIG = {
-  QUEUE: {
-    CONCURRENCY: 3,        // 并发数（1-5）
-  },
-  CACHE: {
-    PROCESSED_MESSAGES_MAX: 1000,  // 消息缓存大小
-    SESSIONS_MAX: 100,             // 会话缓存大小
-  },
-  HTTP: {
-    MAX_SOCKETS: 10,       // 连接池大小
-  },
-};
-```
-
-### 🐛 故障排除
-
-**问题 1：连接失败**
-- 检查 Client ID 和 Client Secret
-- 确认钉钉应用已启用
-- 检查网络连接
-
-**问题 2：无法发送消息**
-- 先在钉钉中发送一条消息获取 sessionWebhook
-- 检查会话 ID 是否正确
-- 确认 sessionWebhook 未过期
-
-**问题 3：内存占用过高**
-- 减小 CACHE 配置中的 max 值
-- 缩短 TTL 时间
-- 检查是否有内存泄漏
-
-### 🤝 贡献
-
-欢迎提交 Issue 和 PR！
-
-### 📄 许可证
-
-MIT License
-
----
-
-<a name="english"></a>
-## 📖 English Documentation
-
-### 🌟 Introduction
-
-DingTalk MCP Server is a [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) based server that connects DingTalk bots with OpenCode AI assistants, enabling bidirectional message communication.
-
-**Key Features:**
-- ✅ **Stream Mode** - Real-time bidirectional communication, no public IP needed
-- ✅ **LRU Cache** - Smart memory management, prevents OOM
-- ✅ **Async Queue** - Concurrency control, 3x throughput improvement
-- ✅ **HTTP Connection Pool** - Keep-Alive reuse, 75% faster sending
-- ✅ **Message Deduplication** - Prevents duplicate message processing
-- ✅ **Rate Limiting** - Respects DingTalk API limits (20 msg/min)
-- ✅ **Long Message Chunking** - Auto-handles messages > 20KB
-
-### 🏗️ Design Framework
-
-#### System Architecture
-
-```
-┌─────────────┐      WebSocket       ┌──────────────────┐
-│ DingTalk    │ ◄──────────────────► │ DingTalk Stream  │
-│   User      │                      │   (DingTalk Cloud)│
-└─────────────┘                      └────────┬─────────┘
-                                              │
-                                     WebSocket│Stream
-                                              │
-                                     ┌────────▼─────────┐
-                                     │ DingTalk MCP     │
-                                     │    Server        │
-                                     │  (This Server)   │
-                                     └────────┬─────────┘
-                                              │
-                                     MCP Stdio│Protocol
-                                              │
-                                     ┌────────▼─────────┐
-                                     │    OpenCode      │
-                                     │  (AI Assistant)  │
-                                     └──────────────────┘
-```
-
-### 🚀 Quick Start
-
-#### 1. Get DingTalk App Credentials
-
-1. Visit [DingTalk Open Platform](https://open.dingtalk.com/)
-2. Create an enterprise internal application
-3. Get **Client ID** and **Client Secret**
-
-#### 2. Install Dependencies
-
-```bash
-git clone <repository-url>
-cd dingtalk-mcp-server
-npm install
-```
-
-#### 3. Configure Environment Variables
-
-```bash
-cp .env.example .env
-# Edit .env file with your credentials
-```
-
-```env
-DINGTALK_CLIENT_ID=your_client_id
-DINGTALK_CLIENT_SECRET=your_client_secret
-OPENCODE_SERVER_URL=http://127.0.0.1:4096
-```
-
-#### 4. Start the Server
-
-```bash
-npm start
-```
-
-#### 5. Configure OpenCode
-
-Add to your OpenCode config file (`~/.config/opencode/opencode.json`):
-
-```json
-{
-  "mcp": {
-    "dingtalk": {
-      "type": "local",
-      "command": [
-        "node",
-        "/path/to/dingtalk-mcp-server/index.mjs"
+        "D:\\同步文件夹\\软件\\3 - AI 生产力\\5. 项目Projects\\opencode-dingtalk-mcp-server\\index.mjs"
       ],
       "enabled": true
     }
@@ -388,14 +161,102 @@ Add to your OpenCode config file (`~/.config/opencode/opencode.json`):
 }
 ```
 
-#### 6. Test
+### 第五步：启动
 
-Send a message to your bot in DingTalk and observe the terminal output.
+先确保 OpenCode 处于运行状态，然后启动 MCP Server：
 
-### 📄 License
+```bash
+npm start
+```
 
-MIT License
+或者通过 OpenCode 自动管理（配置 MCP 后 OpenCode 会在需要时自动拉起）。
 
 ---
 
-**Made with ❤️ for the OpenCode Community**
+## 🛠️ 可用工具
+
+| 工具 | 功能 |
+|---|---|
+| `dingtalk_send_message` | 发送文本/Markdown 消息到钉钉会话 |
+| `dingtalk_get_stats` | 获取服务器运行统计（消息数、处理时间、内存等） |
+
+---
+
+## ⚙️ 配置参考
+
+### 核心配置项
+
+| 配置项 | 说明 | 默认值 |
+|---|---|---|
+| `DINGTALK_CLIENT_ID` | 钉钉应用 Client ID | — |
+| `DINGTALK_CLIENT_SECRET` | 钉钉应用 Client Secret | — |
+| `OPENCODE_SERVER_URL` | OpenCode 服务地址 | `http://127.0.0.1:4096` |
+
+### 缓存配置（源码中调整）
+
+| 参数 | 说明 | 默认值 |
+|---|---|---|
+| `CACHE.PROCESSED_MESSAGES_MAX` | 消息去重缓存上限 | 1000 条 |
+| `CACHE.SESSIONS_MAX` | 会话缓存上限 | 100 个 |
+| `CACHE.WEBHOOKS_MAX` | Webhook 缓存上限 | 100 个 |
+
+### Stream 模式说明
+
+本服务使用钉钉 **Stream 模式**（WebSocket 长连接），而非传统的 Webhook 模式：
+
+- ✅ **不需要公网 IP** — 连接是客户端主动发起的
+- ✅ **不需要配置防火墙** — 不监听外部端口
+- ✅ **自动重连** — 断线后指数退避重连（最多 10 次）
+- ✅ **实时双向** — WebSocket 全双工通信
+
+---
+
+## 🔧 维护指南
+
+### 项目结构
+
+```
+opencode-dingtalk-mcp-server/
+├── index.mjs          ← 唯一源码文件（~18KB，核心逻辑 ~250 行）
+├── package.json       ← 依赖和脚本配置
+├── .env.example       ← 环境变量模板
+├── .env               ← 本地环境变量（已 gitignore）
+├── README.md          ← 本文件
+├── CONTRIBUTING.md    ← 贡献指南
+└── LICENSE            ← MIT 协议
+```
+
+### 依赖关系
+
+```
+index.mjs
+├── @modelcontextprotocol/sdk        ← MCP 官方（维护稳定）
+├── @opencode-ai/sdk                 ← OpenCode 官方（维护稳定）
+├── dingtalk-stream-sdk-nodejs       ← 钉钉官方（维护稳定）
+├── got                              ← HTTP 客户端（成熟）
+├── lru-cache                        ← 缓存库（成熟）
+└── p-queue                          ← 队列（成熟）
+```
+
+所有核心依赖均为**官方维护的产品级 SDK**，上层封装极薄。只要底座不动，本项目的维护量就很小。
+
+### 后续可扩展方向
+
+- [ ] 合并钉钉官方 MCP 工具能力（发卡片、查日程、操作通讯录）
+- [ ] 增加更多消息类型支持（图片、文件、语音）
+- [ ] WebUI 管理界面
+- [ ] 多会话隔离
+
+---
+
+## 📄 许可证
+
+MIT License — 见 `LICENSE` 文件。
+
+## 🔗 相关链接
+
+- [钉钉开放平台](https://open.dingtalk.com/)
+- [钉钉 Stream 模式文档](https://open.dingtalk.com/document/orgapp/stream-mode)
+- [Model Context Protocol](https://modelcontextprotocol.io/)
+- [OpenCode](https://opencode.ai/)
+- [原项目 yewh/opencode-dingtalk-mcp-server](https://github.com/yewh/opencode-dingtalk-mcp-server)
